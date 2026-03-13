@@ -11,89 +11,71 @@ import mne
 mne.set_log_level("ERROR")
 
 # ------------------------------------------------------------
-# Parameters
+# Data load
 # ------------------------------------------------------------
-fPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/Modeling/Data/"
+fPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/"
 bPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/"
-fileName = "train_test_PCA_BI_full.pkl"
-TOI_list = ["Bio", "Int"]
+fileName = "Data_sen_lepoch_full.pkl"  # Ch x Time x Trial x Subject
+logName = "senIdx_TOI.pkl"
 n_sub = 137  # N subjects
-n_fold = 5  # N PCA folds
-fs = 250  # Sampling frequency (Hz)
-results = {}
+
+# EEG data load
+with open(fPath + fileName, "rb") as file:
+    Dataset = pickle.load(file)
+
+# Log data load
+with open(bPath + logName, "rb") as file:
+    log = pickle.load(file)["Sentiment"]
+
 
 # ------------------------------------------------------------
-# Loop over TOIs
+# TF Decomposition
 # ------------------------------------------------------------
-for TOI in TOI_list:
-    print(f"\nProcessing TOI: {TOI}")
 
-    with open(fPath + fileName, "rb") as file:
-        Dataset = pickle.load(file)
 
-    split_data = Dataset["split_data"][TOI]
-    pcaDataset = Dataset["pcaData"]
+def tf_decomposition(data, sfreq, freqs, n_cycles):
+    """
+    Perform time-frequency decomposition using Morlet wavelets.
 
-    trf_response = []
+    Parameters:
+    - data: 3D array (n_trials, n_channels, n_timepoints)
+    - sfreq: Sampling frequency (Hz)
+    - freqs: Array of frequencies to analyze (Hz)
+    - n_cycles: Number of cycles in Morlet wavelet
 
-    # --------------------------------------------------------
-    # Subject Loop
-    # --------------------------------------------------------
-    for sub in tqdm(range(n_sub), desc=f"Subject Loop ({TOI})"):
-        trf_sub = []
+    Returns:
+    - power: 4D array (n_trials, n_channels, n_freqs, n_timepoints) of power values
+    """
 
-        for k in range(n_fold):
-            EEG = np.concatenate(
-                (
-                    pcaDataset[k]["pcaData"][:, :, split_data[sub][k]["positive"], sub],
-                    pcaDataset[k]["pcaData"][
-                        :, :, split_data[sub][k]["test_positive"], sub
-                    ],
-                    pcaDataset[k]["pcaData"][:, :, split_data[sub][k]["negative"], sub],
-                    pcaDataset[k]["pcaData"][
-                        :, :, split_data[sub][k]["test_negative"], sub
-                    ],
-                ),
-                axis=2,
-            ).transpose(
-                2, 0, 1
-            )  # (trials, PCs, time points)
+    n_trials, n_channels, n_timepoints = data.shape
+    power = np.zeros((n_trials, n_channels, len(freqs), n_timepoints))
 
-            info = mne.create_info(
-                ch_names=[f"PC{i+1}" for i in range(EEG.shape[1])],
-                sfreq=fs,
-                ch_types="eeg",
-            )
+    for trial in tqdm(range(n_trials), desc="Processing trials"):
+        for ch in range(n_channels):
+            # Create MNE Epochs object for the current trial and channel
+            info = mne.create_info(ch_names=[f"ch{ch}"], sfreq=sfreq)
+            epochs = mne.EpochsArray(data[trial, ch][None, None, :], info)
 
-            epochs = mne.EpochsArray(EEG, info)
-
-            freqs = np.linspace(1, 80, 80)  # Frequencies of interest
-            n_cycles = freqs / 2.0  # Number of cycles for each frequency
-
-            trf = epochs.compute_tfr(
-                method="morlet",
+            # Perform time-frequency decomposition
+            tfr = mne.time_frequency.tfr_morlet(
+                epochs,
                 freqs=freqs,
                 n_cycles=n_cycles,
                 return_itc=False,
                 average=False,
             )
+            power[trial, ch] = tfr.data[0]
 
-            trf_sub.append(trf.data)
+    return power
 
-        trf.apply_baseline(mode="zscore", baseline=(0, 0.2))
-        trf_response.append(np.mean(np.array(trf_sub), axis=0))
-
-    results[TOI] = np.array(trf_response).transpose(0, 2, 3, 4, 1)[
-        :, :, :, np.arange(300), :
-    ]  # (subjects, PCs, frequencies, time points, epochs)
 
 # ------------------------------------------------------------
 # Save results
 # ------------------------------------------------------------
 
-with open(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TF Analysis/Results/trf_response_full.pkl",
-    "wb",
-) as file:
-    pickle.dump(results, file)
-print("\nTF response analysis completed and saved.")
+# with open(
+#     "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TF Analysis/Results/trf_response_full.pkl",
+#     "wb",
+# ) as file:
+#     pickle.dump(results, file)
+# print("\nTF response analysis completed and saved.")
