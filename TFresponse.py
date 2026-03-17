@@ -145,8 +145,8 @@ for n in tqdm(range(n_sub)):
 # ------------------------------------------------------------
 
 with open(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TF Analysis/Results/trf_response_full.pkl",
-    "rb",
+    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/trf_response_full.pkl",
+    "wb",
 ) as file:
     pickle.dump(results, file)
 print("\nTF response analysis completed and saved.")
