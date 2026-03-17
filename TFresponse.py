@@ -72,7 +72,7 @@ def tf_decomposition(data, sfreq, freqs, n_cycles):
 
 # Parameters for TF decomposition
 sfreq = 250
-freqs = np.linspace(np.log10(3), np.log10(60), 40)  # Frequencies from 1 to 60 Hz
+freqs = np.logspace(np.log10(3), np.log10(60), 40)  # Frequencies from 1 to 60 Hz
 n_cycles = freqs / 2  # Number of cycles for each frequency
 
 ch = [
