@@ -1,6 +1,5 @@
 # ============================================================
 # Time-frequency analysis
-# Author: Woojae Jeong
 # ============================================================
 
 import numpy as np
@@ -122,7 +121,7 @@ for n in tqdm(range(n_sub)):
     idx_all = {t: np.array([], dtype=int) for t in types}
 
     for k in conditions:
-        if k != "All":  # Skip 'All' condition for concatenation
+        if k != "All":
             for t in types:
                 idx = log[n][k][
                     t
