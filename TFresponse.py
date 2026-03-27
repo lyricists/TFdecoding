@@ -74,9 +74,10 @@ sfreq = 250
 
 freqs = np.logspace(np.log10(4), np.log10(60), 50)  # Frequencies from 4 to 60 Hz
 n_cycles = np.interp(
-    np.log10(freqs), [np.log10(4), np.log10(60)], [2, 8]
+    np.log10(freqs), [np.log10(4), np.log10(60)], [1, 10]
 )  # Varying cycles
-# n_cycles = freqs / 4  # Number of cycles for each frequency
+
+# n_cycles = freqs / 4  # Number of cycles for each frequency (fixed)
 
 ch = [
     np.concatenate((np.array([3, 4]) - 1, np.array([1, 5]) + 31)),  # Left frontal
@@ -148,7 +149,7 @@ for n in tqdm(range(n_sub)):
 # ------------------------------------------------------------
 
 with open(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/trf_response_full.pkl",
+    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/trf_response_full_ver2.pkl",
     "wb",
 ) as file:
     pickle.dump(results, file)
