@@ -71,8 +71,12 @@ def tf_decomposition(data, sfreq, freqs, n_cycles):
 
 # Parameters for TF decomposition
 sfreq = 250
-freqs = np.logspace(np.log10(3), np.log10(60), 40)  # Frequencies from 1 to 60 Hz
-n_cycles = freqs / 2  # Number of cycles for each frequency
+
+freqs = np.logspace(np.log10(4), np.log10(60), 50)  # Frequencies from 4 to 60 Hz
+n_cycles = np.interp(
+    np.log10(freqs), [np.log10(4), np.log10(60)], [2, 8]
+)  # Varying cycles
+# n_cycles = freqs / 4  # Number of cycles for each frequency
 
 ch = [
     np.concatenate((np.array([3, 4]) - 1, np.array([1, 5]) + 31)),  # Left frontal
@@ -97,10 +101,10 @@ ch = [
 ]
 
 # ROI averaging, time -> -200 - 1000 ms
-data = np.empty((len(ch), 300, Dataset.shape[2], n_sub))
+data = np.empty((len(ch), 425, Dataset.shape[2], n_sub))
 
 for i in range(len(ch)):
-    data[i, :, :, :] = np.mean(Dataset[ch[i], :, :, :][:, np.arange(300), :, :], axis=0)
+    data[i, :, :, :] = np.mean(Dataset[ch[i], :, :, :][:, np.arange(425), :, :], axis=0)
 
 data = data.transpose(2, 0, 1, 3)  # n_trials, n_ROI, n_timepoints, n_subjects
 
@@ -127,7 +131,7 @@ for n in tqdm(range(n_sub)):
                     t
                 ]  # Get trial indices for the current condition and type
                 results[k][t][:, :, :, n] = np.mean(
-                    tfdata[idx, :, :], axis=0
+                    tfdata[idx, :, :, 0:300], axis=0
                 )  # Average across trials for the current condition and type
 
                 idx_all[t] = np.concatenate((idx_all[t], idx))
@@ -135,7 +139,7 @@ for n in tqdm(range(n_sub)):
         else:
             for t in types:
                 results[k][t][:, :, :, n] = np.mean(
-                    tfdata[idx_all[t], :, :], axis=0
+                    tfdata[idx_all[t], :, :, 0:300], axis=0
                 )  # Average across trials for the current condition and type
 
 
