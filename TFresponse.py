@@ -9,23 +9,6 @@ import mne
 
 mne.set_log_level("ERROR")
 
-# ------------------------------------------------------------
-# Data load
-# ------------------------------------------------------------
-fPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/"
-bPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/"
-fileName = "Data_sen_lepoch_full.pkl"  # Ch x Time x Trial x Subject
-logName = "senIdx_TOI.pkl"
-n_sub = 137  # N subjects
-
-# EEG data load
-with open(fPath + fileName, "rb") as file:
-    Dataset = pickle.load(file)
-
-# Log data load
-with open(bPath + logName, "rb") as file:
-    log = pickle.load(file)["Sentiment"]
-
 
 # ------------------------------------------------------------
 # TF Decomposition
@@ -68,6 +51,23 @@ def tf_decomposition(data, sfreq, freqs, n_cycles):
 
     return tfr.data
 
+
+# ------------------------------------------------------------
+# Data load
+# ------------------------------------------------------------
+fPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/"
+bPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/"
+fileName = "Data_sen_lepoch_full.pkl"  # Ch x Time x Trial x Subject
+logName = "senIdx_TOI.pkl"
+n_sub = 137  # N subjects
+
+# EEG data load
+with open(fPath + fileName, "rb") as file:
+    Dataset = pickle.load(file)
+
+# Log data load
+with open(bPath + logName, "rb") as file:
+    log = pickle.load(file)["Sentiment"]
 
 # Parameters for TF decomposition
 sfreq = 250
