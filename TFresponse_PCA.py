@@ -1,5 +1,5 @@
 # ============================================================
-# Time-frequency analysis (PCA)
+# PCA-based Time-frequency analysis
 # ============================================================
 
 import numpy as np
@@ -12,166 +12,291 @@ import mat73
 mne.set_log_level("ERROR")
 
 
-# ------------------------------------------------------------
-# TF decomposition
-# ------------------------------------------------------------
+class TFDecompositionPCA:
+    def __init__(
+        self,
+        fPath: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/",
+        bPath: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/",
+        save_path: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/",
+        fileName: str = "Data_sen_lepoch_full.pkl",
+        logName: str = "senIdx_TOI.pkl",
+        chName: str = "GoodChannel.mat",
+        subIdx: str = "subject_index.mat",
+        n_sub: int = 137,
+        n_components: int = 7,
+        mode: str = None,
+        tmin: int = -0.2,
+        sfreq: int = 250,
+    ):
+        self.fPath = fPath
+        self.bPath = bPath
+        self.save_path = save_path
+        self.fileName = fileName
+        self.logName = logName
+        self.chName = chName
+        self.subIdx = subIdx
+        self.n_sub = n_sub
+        self.n_components = n_components
+        self.mode = mode
+        self.tmin = tmin
+        self.sfreq = sfreq
 
+        self.freqs = np.logspace(np.log10(4), np.log10(60), 50)
+        self.n_cycles = np.interp(
+            np.log10(self.freqs),
+            [np.log10(4), np.log10(60)],
+            [1, 10],
+        )
 
-def tf_decomposition(data, sfreq, freqs, n_cycles):
-    """
-    Perform time-frequency decomposition using Morlet wavelets.
+        # Sentence categories and types
+        self.conditions = ["Biography", "Action", "Reflection", "Intention", "All"]
+        self.types = ["positive", "negative"]
 
-    Parameters:
-    - data: 3D array (n_trials, n_PCs, n_timepoints)
-    - sfreq: Sampling frequency (Hz)
-    - freqs: Array of frequencies to analyze (Hz)
-    - n_cycles: Number of cycles in Morlet wavelet
+    # ------------------------------------------------------------
+    # TF decomposition
+    # ------------------------------------------------------------
+    def decomposition(self, data):
+        """
+        Perform time-frequency decomposition using Morlet wavelets.
 
-    Returns:
-    - power: 4D array (n_trials, n_channels, n_freqs, n_timepoints) of power values
-    """
+        Parameters
+        ----------
+        data : ndarray
+            Shape = (n_trials, n_components, n_timepoints)
 
-    n_trials, n_PCs, n_timepoints = data.shape
+        Returns
+        -------
+        power : ndarray
+            Shape = (n_trials, n_components, n_freqs, n_timepoints)
+        """
 
-    ch_names = [f"ch{i+1}" for i in range(n_PCs)]
-    info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types="eeg")
+        if self.mode == "single":
+            pass
 
-    epochs = mne.EpochsArray(data, info, tmin=-0.2, verbose=False)
+        elif self.mode == "erp":
+            data = data.mean(axis=0, keepdims=True)  # Average over trials for ERP mode
 
-    tfr = mne.time_frequency.tfr_morlet(
-        epochs,
-        freqs=freqs,
-        n_cycles=n_cycles,
-        return_itc=False,
-        average=False,
-        verbose=False,
-        n_jobs=-1,
-    )
+        elif self.mode == "residual":
+            n_trials = data.shape[0]
 
-    # Apply baseline z-score normalization
-    tfr.apply_baseline(baseline=(-0.2, 0), mode="zscore")
+            if n_trials < 2:
+                raise ValueError(
+                    "Leave-one-trial-out residual requires at least 2 trials."
+                )
 
-    return tfr.data
+            # Sum across trials: components x time
+            total = data.sum(axis=0, keepdims=True)
 
+            # Leave-one-trial-out mean for each trial
+            loo_mean = (total - data) / (n_trials - 1)
 
-# ------------------------------------------------------------
-# Data load
-# ------------------------------------------------------------
-fPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/"
-bPath = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/"
-fileName = "Data_sen_lepoch_full.pkl"  # Ch x Time x Trial x Subject
-logName = "senIdx_TOI.pkl"
-chName = "GoodChannel.mat"
-n_sub = 137  # N subjects
-
-# Channel index load
-goodCh = mat73.loadmat(bPath + chName)["Channel"].astype(int) - 1
-
-# EEG data load
-with open(fPath + fileName, "rb") as file:
-    Dataset = pickle.load(file)
-
-Dataset = Dataset[goodCh, :, :, :]
-
-# Log data load
-with open(bPath + logName, "rb") as file:
-    log = pickle.load(file)["Sentiment"]
-
-# Subject index load
-subject_group = mat73.loadmat(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/subject_index.mat"
-)["subject_index"]
-
-group_indices = {
-    "Control": np.where(subject_group == 1)[0],
-    "Depressed": np.where(subject_group == 2)[0],
-    "Suicidal": np.where(subject_group == 3)[0],
-}
-
-# ------------------------------------------------------------
-# PCA spatial feature extraction
-# ------------------------------------------------------------
-
-group_inputs = {"Control": [], "Depressed": [], "Suicidal": []}
-
-for sub in range(n_sub):
-    subject_mean = Dataset[:, :, :, sub].mean(axis=2)
-
-    for group in group_inputs:
-        if sub in group_indices[group]:
-            group_inputs[group].append(subject_mean)
-            break
-
-pca_input = np.concatenate(
-    [
-        np.mean(group_inputs[group], axis=0)
-        for group in ["Control", "Depressed", "Suicidal"]
-    ],
-    axis=1,
-)
-
-# PCA fitting
-pca = PCA(n_components=7)  # Number of PCs to retain (adjust as needed)
-pca.fit(pca_input.T)
-
-# Transform the original data using the fitted PCA
-
-x_pca = pca.fit_transform(Dataset.reshape(Dataset.shape[0], -1).T)
-
-Dataset = x_pca.T.reshape(len(pca.components_), *Dataset.shape[1:])
-
-# Parameters for TF decomposition
-sfreq = 250
-
-freqs = np.logspace(np.log10(4), np.log10(60), 50)  # Frequencies from 4 to 60 Hz
-n_cycles = np.interp(
-    np.log10(freqs), [np.log10(4), np.log10(60)], [1, 10]
-)  # Varying cycles
-
-Dataset = Dataset.transpose(2, 0, 1, 3)  # n_trials, n_PCs, n_timepoints, n_subjects
-
-conditions = ["Biography", "Action", "Reflection", "Intention", "All"]
-types = ["positive", "negative"]
-
-results = {
-    cond: {t: np.empty((len(pca.components_), len(freqs), 300, n_sub)) for t in types}
-    for cond in conditions
-}
-
-print(f"Processing TF decomposition...")
-
-for n in tqdm(range(n_sub)):
-
-    tfdata = tf_decomposition(Dataset[:, :, :, n], sfreq, freqs, n_cycles)
-
-    idx_all = {t: np.array([], dtype=int) for t in types}
-
-    for k in conditions:
-        if k != "All":
-            for t in types:
-                idx = log[n][k][
-                    t
-                ]  # Get trial indices for the current condition and type
-                results[k][t][:, :, :, n] = np.mean(
-                    tfdata[idx, :, :, 0:300], axis=0
-                )  # Average across trials for the current condition and type
-
-                idx_all[t] = np.concatenate((idx_all[t], idx))
+            # Residual = trial - mean(other trials)
+            data = data - loo_mean
 
         else:
-            for t in types:
-                results[k][t][:, :, :, n] = np.mean(
-                    tfdata[idx_all[t], :, :, 0:300], axis=0
-                )  # Average across trials for the current condition and type
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+        _, n_components, _ = data.shape
+
+        ch_names = [f"pc{i+1}" for i in range(n_components)]
+        info = mne.create_info(ch_names=ch_names, sfreq=self.sfreq, ch_types="eeg")
+
+        epochs = mne.EpochsArray(data, info, tmin=self.tmin, verbose=False)
+
+        tfr = mne.time_frequency.tfr_morlet(
+            epochs,
+            freqs=self.freqs,
+            n_cycles=self.n_cycles,
+            return_itc=False,
+            average=False,
+            verbose=False,
+            n_jobs=-1,
+        )
+
+        tfr.apply_baseline(baseline=(self.tmin, 0), mode="zscore")
+        return tfr.data
+
+    # ------------------------------------------------------------
+    # Data load
+    # ------------------------------------------------------------
+    def load_data(self):
+        # Channel index load
+        goodCh = (
+            mat73.loadmat(self.bPath + self.chName)["Channel"].astype(int).ravel() - 1
+        )
+
+        # EEG data load: expected shape = channels x time x trials x subjects
+        with open(self.fPath + self.fileName, "rb") as file:
+            Dataset = pickle.load(file)
+
+        Dataset = Dataset[goodCh, :, :, :]
+
+        # Log data load
+        with open(self.bPath + self.logName, "rb") as file:
+            log = pickle.load(file)["Sentiment"]
+
+        # Subject group load
+        subject_group = mat73.loadmat(self.bPath + self.subIdx)["subject_index"].ravel()
+
+        group_indices = {
+            "Control": np.where(subject_group == 1)[0],
+            "Depressed": np.where(subject_group == 2)[0],
+            "Suicidal": np.where(subject_group == 3)[0],
+        }
+
+        return Dataset, log, group_indices
+
+    # ------------------------------------------------------------
+    # PCA spatial feature extraction
+    # ------------------------------------------------------------
+    def pca_extraction(self, Dataset, group_indices):
+        """
+        Fit PCA on group-averaged ERP maps, then project the full dataset.
+
+        Parameters
+        ----------
+        Dataset : ndarray
+            Shape = (n_channels, n_timepoints, n_trials, n_subjects)
+
+        Returns
+        -------
+        Dataset_pca : ndarray
+            Shape = (n_components, n_timepoints, n_trials, n_subjects)
+        pca : PCA
+            Fitted PCA object
+        """
+        group_inputs = {"Control": [], "Depressed": [], "Suicidal": []}
+
+        for sub in range(self.n_sub):
+            subject_mean = Dataset[:, :, :, sub].mean(axis=2)  # ch x time
+
+            for group_name in group_inputs:
+                if sub in group_indices[group_name]:
+                    group_inputs[group_name].append(subject_mean)
+                    break
+
+        pca_input = np.concatenate(
+            [
+                np.mean(group_inputs[group_name], axis=0)
+                for group_name in ["Control", "Depressed", "Suicidal"]
+            ],
+            axis=1,  # concatenate over time
+        )  # shape: ch x (time * 3)
+
+        pca = PCA(n_components=self.n_components)
+        pca.fit(pca_input.T)  # samples x channels
+
+        # Project full dataset
+        # Original: ch x time x trials x subjects
+        X = Dataset.reshape(Dataset.shape[0], -1).T  # (time*trials*subjects) x ch
+        X_pca = pca.transform(X)  # samples x components
+
+        Dataset_pca = X_pca.T.reshape(
+            self.n_components,
+            Dataset.shape[1],
+            Dataset.shape[2],
+            Dataset.shape[3],
+        )  # comp x time x trials x subjects
+
+        return Dataset_pca, pca
+
+    # ------------------------------------------------------------
+    # Result container
+    # ------------------------------------------------------------
+    def initialize_results(self, n_timepoints):
+        results = {
+            cond: {
+                t: np.empty(
+                    (self.n_components, len(self.freqs), n_timepoints, self.n_sub),
+                    dtype=np.float32,
+                )
+                for t in self.types
+            }
+            for cond in self.conditions
+        }
+        return results
+
+    # ------------------------------------------------------------
+    # Main pipeline
+    # ------------------------------------------------------------
+    def run(self):
+        Dataset, log, group_indices = self.load_data()
+
+        # PCA projection
+        Dataset_pca, pca = self.pca_extraction(Dataset, group_indices)
+
+        # Reorder for TF: trials x components x time x subjects
+        Dataset_pca = Dataset_pca.transpose(2, 0, 1, 3)
+
+        n_keep_time = min(300, Dataset_pca.shape[2])
+        results = self.initialize_results(n_keep_time)
+
+        print("Processing TF decomposition...")
+
+        for n in tqdm(range(self.n_sub)):
+            idx_all = {t: np.array([], dtype=int) for t in self.types}
+
+            for cond in self.conditions:
+                if cond != "All":
+                    for t in self.types:
+                        idx = np.asarray(log[n][cond][t], dtype=int)
+
+                        if len(idx) > 0:
+                            subset = Dataset_pca[
+                                idx, :, :, n
+                            ]  # trials x components x time
+                            tfdata = self.decomposition(
+                                subset
+                            )  # trials x components x freqs x time
+
+                            results[cond][t][:, :, :, n] = np.mean(
+                                tfdata[:, :, :, :n_keep_time], axis=0
+                            )
+
+                            idx_all[t] = np.concatenate((idx_all[t], idx))
+                        else:
+                            results[cond][t][:, :, :, n] = np.nan
+
+                else:
+                    for t in self.types:
+                        if len(idx_all[t]) > 0:
+                            subset = Dataset_pca[idx_all[t], :, :, n]
+                            tfdata = self.decomposition(subset)
+
+                            results[cond][t][:, :, :, n] = np.mean(
+                                tfdata[:, :, :, :n_keep_time], axis=0
+                            )
+                        else:
+                            results[cond][t][:, :, :, n] = np.nan
+
+        # Save results
+        with open(
+            self.save_path + "trf_response_pca_" + self.mode + ".pkl", "wb"
+        ) as file:
+            pickle.dump(
+                {
+                    "results": results,
+                    "pca_components": pca.components_,
+                    "explained_variance_ratio": pca.explained_variance_ratio_,
+                    "freqs": self.freqs,
+                    "n_cycles": self.n_cycles,
+                    "sfreq": self.sfreq,
+                    "tmin": self.tmin,
+                },
+                file,
+            )
+
+        print("\nTF response analysis completed and saved.")
+        return results, pca
 
 
 # ------------------------------------------------------------
-# Save results
+# Run
 # ------------------------------------------------------------
-
-with open(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/trf_response_pca.pkl",
-    "wb",
-) as file:
-    pickle.dump(results, file)
-print("\nTF response analysis completed and saved.")
+if __name__ == "__main__":
+    analyzer = TFDecompositionPCA(
+        n_sub=137,
+        n_components=7,
+        mode="single",
+    )
+    results, pca = analyzer.run()
