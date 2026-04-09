@@ -294,9 +294,10 @@ class TFDecompositionPCA:
 # Run
 # ------------------------------------------------------------
 if __name__ == "__main__":
+
     analyzer = TFDecompositionPCA(
         n_sub=137,
         n_components=7,
-        mode="single",
+        mode="residual",
     )
-    results, pca = analyzer.run()
+    analyzer.run()
