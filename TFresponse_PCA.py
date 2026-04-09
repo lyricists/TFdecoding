@@ -298,6 +298,6 @@ if __name__ == "__main__":
     analyzer = TFDecompositionPCA(
         n_sub=137,
         n_components=7,
-        mode="residual",
+        mode="single",  # "single", "erp", or "residual"
     )
     analyzer.run()
