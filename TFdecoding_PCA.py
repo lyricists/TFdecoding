@@ -145,7 +145,7 @@ class TFBandDecoder:
                 f"{self.tmin} to {self.tmax} s at {self.sfreq} Hz."
             )
 
-        self.decode_mask = (self.times >= self.decode_tmin) & (
+        self.decode_mask = (self.times > self.decode_tmin) & (
             self.times <= self.decode_tmax
         )
         self.decode_times = self.times[self.decode_mask]
@@ -598,13 +598,13 @@ if __name__ == "__main__":
     decoder = TFBandDecoder(
         numPC=3,
         k_fold=5,
-        Trial_num=10,
+        Trial_num=250,
         avg_num=12,
         tmin=-0.2,
         tmax=1.5,  # TF runs on full -200 to 1500 ms
         decode_tmin=-0.2,
         decode_tmax=1.0,  # decoding runs on -200 to 1000 ms
-        mode="induced",  # "evoked" or "induced"
+        mode="evoked",  # "evoked" or "induced"
         bands=bands,
-        saveName="TFBandDecoding_3pc_test.pkl",
+        saveName="TFBandDecoding_3pc_evoked.pkl",
     )
