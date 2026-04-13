@@ -1,9 +1,5 @@
 # ============================================================
-# PCA-based Time-frequency band decoding
-# Modes:
-#   - "evoked"  : bootstrap-average in time domain first, then TF
-#   - "induced" : TF on single pseudo-trials first, baseline, then
-#                 average power across sampled pseudo-trials
+# PCA-based single-trial time-frequency band decoding
 # ============================================================
 
 import os
@@ -36,19 +32,16 @@ class TFBandDecoder:
         chName: str = "GoodChannel.mat",
         k_fold: int = 5,
         numPC: int = 3,
-        Trial_num: int = 250,
-        avg_num: int = 12,
         sfreq: int = 250,
         tmin: float = -0.2,
-        tmax: float = 1.5,  # full epoch for TF
-        decode_tmin: float = -0.2,  # decoding window start
-        decode_tmax: float = 1.0,  # decoding window end
+        tmax: float = 1.5,
+        decode_tmin: float = -0.2,
+        decode_tmax: float = 1.0,
         fmin: float = 4.0,
         fmax: float = 60.0,
         n_freqs: int = 50,
-        mode: str = "evoked",  # "evoked" or "induced"
         state: int = 42,
-        saveName: str = "TFBandDecoding.pkl",
+        saveName: str = "TFBandDecoding_single_trial.pkl",
         dtype=np.float32,
         bands: dict = None,
     ):
@@ -62,20 +55,14 @@ class TFBandDecoder:
 
         self.kfold = k_fold
         self.numPC = numPC
-        self.Trial_num = Trial_num
-        self.avg_num = avg_num
         self.sfreq = sfreq
         self.tmin = tmin
         self.tmax = tmax
         self.decode_tmin = decode_tmin
         self.decode_tmax = decode_tmax
-        self.mode = mode.lower()
         self.state = state
         self.saveName = saveName
         self.dtype = dtype
-
-        if self.mode not in {"evoked", "induced"}:
-            raise ValueError("mode must be either 'evoked' or 'induced'")
 
         self.freqs = np.logspace(np.log10(fmin), np.log10(fmax), n_freqs).astype(
             np.float32
@@ -161,7 +148,7 @@ class TFBandDecoder:
             f"Decode window: {self.decode_tmin:.3f} to {self.decode_tmax:.3f} s "
             f"({self.decode_times.size} samples)"
         )
-        print(f"Mode: {self.mode}")
+        print("Single-trial TF-band decoding")
 
     # ------------------------------------------------------------
     # Train/test split per subject, separately for pos and neg
@@ -273,37 +260,6 @@ class TFBandDecoder:
         return Xp
 
     # ------------------------------------------------------------
-    # Bootstrap average in time domain (for evoked)
-    # Input: comp x time x trials
-    # Output: n_aug x comp x time
-    # ------------------------------------------------------------
-    def bootstrap_average_time(self, data, idx_pool, n_aug, rng):
-        idx_pool = np.asarray(idx_pool, dtype=int)
-
-        if len(idx_pool) == 0:
-            raise ValueError("Empty idx_pool in bootstrap_average_time")
-
-        sampled = rng.choice(idx_pool, size=(n_aug, self.avg_num), replace=True)
-        sampled_data = data[:, :, sampled]  # comp x time x n_aug x avg_num
-        pseudo = sampled_data.mean(axis=-1)  # comp x time x n_aug
-        pseudo = np.transpose(pseudo, (2, 0, 1))  # n_aug x comp x time
-
-        return pseudo.astype(self.dtype, copy=False)
-
-    # ------------------------------------------------------------
-    # Build bootstrap index matrix only (for induced)
-    # Output: n_aug x avg_num
-    # ------------------------------------------------------------
-    def bootstrap_sample_indices(self, idx_pool, n_aug, rng):
-        idx_pool = np.asarray(idx_pool, dtype=int)
-
-        if len(idx_pool) == 0:
-            raise ValueError("Empty idx_pool in bootstrap_sample_indices")
-
-        sampled = rng.choice(idx_pool, size=(n_aug, self.avg_num), replace=True)
-        return sampled
-
-    # ------------------------------------------------------------
     # TF decomposition
     # Input: epochs x comp x time
     # Output: epochs x comp x freq x time
@@ -326,7 +282,6 @@ class TFBandDecoder:
         if not np.all(np.isfinite(power)):
             raise ValueError("Raw TF power contains NaN or Inf.")
 
-        # Allow tiny numerical negatives only
         if np.nanmin(power) < -1e-7:
             raise ValueError("Raw TF power contains strongly negative values.")
 
@@ -334,7 +289,7 @@ class TFBandDecoder:
 
         baseline_mask = (self.times >= self.tmin) & (self.times <= 0)
         if not np.any(baseline_mask):
-            raise ValueError("Baseline window is empty")
+            raise ValueError("Baseline window is empty.")
 
         baseline = power[..., baseline_mask]  # epochs x comp x freq x baseline_time
         b_mean = baseline.mean(axis=-1, keepdims=True)
@@ -370,83 +325,60 @@ class TFBandDecoder:
         return band_data.astype(self.dtype, copy=False)
 
     # ------------------------------------------------------------
-    # Feature generation for evoked
+    # Build single-trial TF-band features directly from trial indices
+    # Input subj_pca: comp x time x trial
     # Output: epochs x comp x band x time
     # ------------------------------------------------------------
-    def make_features_evoked(self, subj_pca, idx_pool, n_aug):
-        pseudo = self.bootstrap_average_time(subj_pca, idx_pool, n_aug, self.rng)
-        tf = self.tf_decompose(pseudo)
-        band = self.tf_band_average(tf)
-        return band[:, :, :, self.decode_mask]
+    def make_features_single_trial(self, subj_pca, idx_pool):
+        idx_pool = np.asarray(idx_pool, dtype=int)
 
-    # ------------------------------------------------------------
-    # Feature generation for induced
-    # TF each sampled trial first, then average power within each
-    # bootstrap set
-    # Output: epochs x comp x band x time
-    # ------------------------------------------------------------
-    def make_features_induced(self, subj_pca, idx_pool, n_aug):
-        sampled = self.bootstrap_sample_indices(idx_pool, n_aug, self.rng)
-        unique_trials, inverse = np.unique(sampled, return_inverse=True)
+        if len(idx_pool) == 0:
+            raise ValueError("Empty idx_pool in make_features_single_trial")
 
-        # TF only once per unique trial
         single_trials = np.transpose(
-            subj_pca[:, :, unique_trials], (2, 0, 1)
-        )  # n_unique x comp x time
+            subj_pca[:, :, idx_pool], (2, 0, 1)
+        )  # trials x comp x time
 
-        tf_unique = self.tf_decompose(single_trials)  # n_unique x comp x freq x time
-        band_unique = self.tf_band_average(tf_unique)  # n_unique x comp x band x time
+        tf = self.tf_decompose(single_trials)  # trials x comp x freq x time
+        band = self.tf_band_average(tf)  # trials x comp x band x time
 
-        # Reconstruct sampled bootstrap sets and average power
-        band_sampled = band_unique[inverse].reshape(
-            n_aug,
-            self.avg_num,
-            self.numPC,
-            len(self.band_names),
-            self.n_times,
-        )  # n_aug x avg_num x comp x band x time
-
-        band_avg = band_sampled.mean(axis=1)  # n_aug x comp x band x time
-        return band_avg[:, :, :, self.decode_mask].astype(self.dtype, copy=False)
+        return band[:, :, :, self.decode_mask].astype(self.dtype, copy=False)
 
     # ------------------------------------------------------------
-    # Generate class labels
+    # Generate class labels from actual trial counts
     # ------------------------------------------------------------
-    def gen_class_labels(self):
-        n_train_each = int(self.Trial_num * 0.8)
-        n_test_each = int(self.Trial_num * 0.2)
-
-        y_train = np.concatenate(
+    def gen_class_labels(self, n_pos, n_neg):
+        y = np.concatenate(
             [
-                np.zeros(n_train_each, dtype=int),
-                np.ones(n_train_each, dtype=int),
+                np.zeros(n_pos, dtype=int),
+                np.ones(n_neg, dtype=int),
             ]
         )
-        y_test = np.concatenate(
-            [
-                np.zeros(n_test_each, dtype=int),
-                np.ones(n_test_each, dtype=int),
-            ]
-        )
-
-        return y_train, y_test
+        return y
 
     # ------------------------------------------------------------
     # Decode one subject, one fold
     # band_train/test shape: epochs x comp x band x time
     # Return: band x time
     # ------------------------------------------------------------
-    def decode_band_timecourse(self, band_train, band_test):
-        y_train, y_test = self.gen_class_labels()
-        n_bands = band_train.shape[2]
-        n_times = band_train.shape[3]
+    def decode_band_timecourse(
+        self, pos_train_feat, neg_train_feat, pos_test_feat, neg_test_feat
+    ):
+        train_feat = np.concatenate([pos_train_feat, neg_train_feat], axis=0)
+        test_feat = np.concatenate([pos_test_feat, neg_test_feat], axis=0)
+
+        y_train = self.gen_class_labels(len(pos_train_feat), len(neg_train_feat))
+        y_test = self.gen_class_labels(len(pos_test_feat), len(neg_test_feat))
+
+        n_bands = train_feat.shape[2]
+        n_times = train_feat.shape[3]
 
         scores = np.zeros((n_bands, n_times), dtype=self.dtype)
 
         for b in range(n_bands):
             for t in range(n_times):
-                x_train = band_train[:, :, b, t]  # epochs x comp
-                x_test = band_test[:, :, b, t]
+                x_train = train_feat[:, :, b, t]  # epochs x comp
+                x_test = test_feat[:, :, b, t]
 
                 train_perm = self.rng.permutation(len(y_train))
                 test_perm = self.rng.permutation(len(y_test))
@@ -486,13 +418,10 @@ class TFBandDecoder:
             "times_decode": self.decode_times,
             "freqs": self.freqs,
             "sfreq": self.sfreq,
-            "mode": self.mode,
             "numPC": self.numPC,
             "subIdx": self.subIdx,
             "decode_tmin": self.decode_tmin,
             "decode_tmax": self.decode_tmax,
-            "avg_num": self.avg_num,
-            "Trial_num": self.Trial_num,
         }
 
         save_path = os.path.join(self.save_dir, self.saveName)
@@ -514,64 +443,38 @@ class TFBandDecoder:
             dtype=self.dtype,
         )
 
-        print("Running fold-specific PCA + TF-band decoding")
+        print("Running fold-specific PCA + single-trial TF-band decoding")
 
         for k in range(self.kfold):
-            print(f"\nFold {k+1}/{self.kfold}")
+            print(f"\nFold {k + 1}/{self.kfold}")
 
             pca = self.fit_pca_for_fold(k)
 
-            for n in tqdm(range(self.n_sub), desc=f"Subjects fold {k+1}"):
+            for n in tqdm(range(self.n_sub), desc=f"Subjects fold {k + 1}"):
                 subj_raw = self.Dataset[:, :, :, n]  # ch x time x trial
-                subj_pca = self.project_subject_pca(
-                    subj_raw, pca
-                )  # comp x time x trial
+                subj_pca = self.project_subject_pca(subj_raw, pca)
 
                 pos_train = self.split_data[n]["positive"][k]["train"]
                 pos_test = self.split_data[n]["positive"][k]["test"]
                 neg_train = self.split_data[n]["negative"][k]["train"]
                 neg_test = self.split_data[n]["negative"][k]["test"]
 
-                n_train_each = int(self.Trial_num * 0.8)
-                n_test_each = int(self.Trial_num * 0.2)
+                pos_train_feat = self.make_features_single_trial(subj_pca, pos_train)
+                neg_train_feat = self.make_features_single_trial(subj_pca, neg_train)
+                pos_test_feat = self.make_features_single_trial(subj_pca, pos_test)
+                neg_test_feat = self.make_features_single_trial(subj_pca, neg_test)
 
-                if self.mode == "evoked":
-                    pos_train_feat = self.make_features_evoked(
-                        subj_pca, pos_train, n_train_each
-                    )
-                    neg_train_feat = self.make_features_evoked(
-                        subj_pca, neg_train, n_train_each
-                    )
-                    pos_test_feat = self.make_features_evoked(
-                        subj_pca, pos_test, n_test_each
-                    )
-                    neg_test_feat = self.make_features_evoked(
-                        subj_pca, neg_test, n_test_each
-                    )
-
-                elif self.mode == "induced":
-                    pos_train_feat = self.make_features_induced(
-                        subj_pca, pos_train, n_train_each
-                    )
-                    neg_train_feat = self.make_features_induced(
-                        subj_pca, neg_train, n_train_each
-                    )
-                    pos_test_feat = self.make_features_induced(
-                        subj_pca, pos_test, n_test_each
-                    )
-                    neg_test_feat = self.make_features_induced(
-                        subj_pca, neg_test, n_test_each
-                    )
-
-                train_feat = np.concatenate([pos_train_feat, neg_train_feat], axis=0)
-                test_feat = np.concatenate([pos_test_feat, neg_test_feat], axis=0)
-
-                scores = self.decode_band_timecourse(train_feat, test_feat)
+                scores = self.decode_band_timecourse(
+                    pos_train_feat,
+                    neg_train_feat,
+                    pos_test_feat,
+                    neg_test_feat,
+                )
                 self.decode_scores_folds[n, k] = scores
 
                 del subj_raw, subj_pca
                 del pos_train_feat, neg_train_feat, pos_test_feat, neg_test_feat
-                del train_feat, test_feat, scores
+                del scores
                 gc.collect()
 
             del pca
@@ -587,7 +490,6 @@ class TFBandDecoder:
 # Run
 # ------------------------------------------------------------
 if __name__ == "__main__":
-
     bands = {
         "theta": (4, 8),
         "alpha": (8, 13),
@@ -598,13 +500,10 @@ if __name__ == "__main__":
     decoder = TFBandDecoder(
         numPC=3,
         k_fold=5,
-        Trial_num=250,
-        avg_num=12,
         tmin=-0.2,
-        tmax=1.5,  # TF runs on full -200 to 1500 ms
+        tmax=1.5,
         decode_tmin=-0.2,
-        decode_tmax=1.0,  # decoding runs on -200 to 1000 ms
-        mode="evoked",  # "evoked" or "induced"
+        decode_tmax=1.0,
         bands=bands,
-        saveName="TFBandDecoding_3pc_evoked.pkl",
+        saveName="TFBandDecoding_3pc_single_trial.pkl",
     )
