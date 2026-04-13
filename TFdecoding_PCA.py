@@ -505,5 +505,5 @@ if __name__ == "__main__":
         decode_tmin=-0.2,
         decode_tmax=1.0,
         bands=bands,
-        saveName="TFBandDecoding_3pc_single_trial.pkl",
+        saveName="TFBandDecoding_3pc_induced.pkl",
     )
