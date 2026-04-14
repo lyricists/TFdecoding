@@ -30,7 +30,7 @@ class TFBandDecoder:
         fpath: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/",
         bPath: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/",
         save_dir: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/",
-        fileName: str = "Data_sen_lepoch_full.pkl",
+        fileName: str = "Data_sen_lepoch_full_long.pkl",
         IdxName: str = "subject_index.mat",
         logName: str = "senIdx_congruent.pkl",
         chName: str = "GoodChannel.mat",
@@ -600,25 +600,11 @@ if __name__ == "__main__":
         k_fold=5,
         Trial_num=250,
         avg_num=12,
-        tmin=-0.2,
-        tmax=1.5,  # TF runs on full -200 to 1500 ms
+        tmin=-0.3,
+        tmax=1.5,  # TF runs on full -300 to 1500 ms
         decode_tmin=-0.2,
         decode_tmax=1.0,  # decoding runs on -200 to 1000 ms
         mode="evoked",  # "evoked" or "induced"
         bands=bands,
         saveName="TFBandDecoding_3pc_evoked.pkl",
-    )
-
-    decoder = TFBandDecoder(
-        numPC=3,
-        k_fold=5,
-        Trial_num=250,
-        avg_num=12,
-        tmin=-0.2,
-        tmax=1.5,  # TF runs on full -200 to 1500 ms
-        decode_tmin=-0.2,
-        decode_tmax=1.0,  # decoding runs on -200 to 1000 ms
-        mode="induced",  # "evoked" or "induced"
-        bands=bands,
-        saveName="TFBandDecoding_3pc_induced.pkl",
     )
