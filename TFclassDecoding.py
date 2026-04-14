@@ -21,6 +21,10 @@
 # Contrasts:
 #   positive, negative, neg_minus_pos
 #
+# Classifiers:
+#   - "svm"    -> LinearSVC
+#   - "logreg" -> LogisticRegression
+#
 # Output:
 #   results[comparison][category][contrast]["score"]
 # ============================================================
@@ -34,6 +38,7 @@ from tqdm import tqdm
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score
 
 import mne
@@ -69,7 +74,8 @@ class TFBandDecoder:
         comparisons=None,
         roi_clusters=None,
         roi_names=None,
-        svm_c=1.0,
+        classifier="svm",  # "svm" or "logreg"
+        clf_c=1.0,
         tf_n_jobs=1,
     ):
         self.fpath = fpath
@@ -90,8 +96,12 @@ class TFBandDecoder:
         self.state = state
         self.saveName = saveName
         self.dtype = dtype
-        self.svm_c = svm_c
         self.tf_n_jobs = tf_n_jobs
+
+        self.classifier = classifier.lower()
+        self.clf_c = clf_c
+        if self.classifier not in {"svm", "logreg"}:
+            raise ValueError("classifier must be either 'svm' or 'logreg'")
 
         self.freqs = np.logspace(np.log10(fmin), np.log10(fmax), n_freqs).astype(
             self.dtype
@@ -208,7 +218,7 @@ class TFBandDecoder:
             f"Decode window: {self.decode_tmin:.3f} to {self.decode_tmax:.3f} s "
             f"({self.decode_times.size} samples)"
         )
-        print("ROI-averaged TF class decoding")
+        print(f"ROI-averaged TF class decoding | classifier={self.classifier}")
 
     # ------------------------------------------------------------
     # ROI averaging
@@ -230,7 +240,6 @@ class TFBandDecoder:
         )
 
         for i, roi in enumerate(tqdm(self.roi_clusters, desc="ROIs")):
-            # average channels within ROI
             self.ROIData[i] = (
                 self.Dataset[roi].mean(axis=0).astype(self.dtype, copy=False)
             )
@@ -456,6 +465,30 @@ class TFBandDecoder:
         return (X_train - mean_) / std_, (X_test - mean_) / std_
 
     # ------------------------------------------------------------
+    # Classifier factory
+    # ------------------------------------------------------------
+    def _make_classifier(self):
+        if self.classifier == "svm":
+            return LinearSVC(
+                C=self.clf_c,
+                class_weight="balanced",
+                random_state=self.state,
+                max_iter=10000,
+            )
+
+        if self.classifier == "logreg":
+            return LogisticRegression(
+                C=self.clf_c,
+                penalty="l2",
+                class_weight="balanced",
+                solver="liblinear",
+                random_state=self.state,
+                max_iter=10000,
+            )
+
+        raise ValueError(f"Unknown classifier: {self.classifier}")
+
+    # ------------------------------------------------------------
     # Main run
     # ------------------------------------------------------------
     def run(self):
@@ -471,6 +504,7 @@ class TFBandDecoder:
                 "bands": self.bands,
                 "band_names": self.band_names,
                 "roi_names": self.roi_names,
+                "roi_sizes": self.roi_sizes,
                 "categories": self.categories,
                 "contrasts": self.contrasts,
                 "comparisons": self.comparisons,
@@ -558,12 +592,7 @@ class TFBandDecoder:
                                     Xt_train, Xt_test
                                 )
 
-                                clf = LinearSVC(
-                                    C=self.svm_c,
-                                    class_weight="balanced",
-                                    random_state=self.state,
-                                    max_iter=10000,
-                                )
+                                clf = self._make_classifier()
                                 clf.fit(Xt_train, y_train)
                                 y_pred = clf.predict(Xt_test)
 
@@ -674,6 +703,7 @@ if __name__ == "__main__":
         comparisons=comparisons,
         roi_clusters=roi_clusters,
         roi_names=roi_names,
-        saveName="TFclassDecoding_ROI.pkl",
+        classifier="logreg",  # "svm" or "logreg"
+        saveName="TFclassDecoding_ROI_logreg.pkl",
         tf_n_jobs=1,
     )
