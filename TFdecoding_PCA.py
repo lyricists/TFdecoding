@@ -26,7 +26,7 @@ class TFBandDecoder:
         fpath: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Preprocessed data/",
         bPath: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Data/Behavior/",
         save_dir: str = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/",
-        fileName: str = "Data_sen_lepoch_full.pkl",
+        fileName: str = "Data_sen_lepoch_full_long.pkl",
         IdxName: str = "subject_index.mat",
         logName: str = "senIdx_congruent.pkl",
         chName: str = "GoodChannel.mat",
@@ -500,7 +500,7 @@ if __name__ == "__main__":
     decoder = TFBandDecoder(
         numPC=3,
         k_fold=5,
-        tmin=-0.2,
+        tmin=-0.3,
         tmax=1.5,
         decode_tmin=-0.2,
         decode_tmax=1.0,
