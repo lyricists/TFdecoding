@@ -11,6 +11,9 @@
 #   1) split subjects
 #   2) fit PCA on ALL training trials from training subjects only
 #   3) project train/test subjects into fold-specific PC space
+# Supports:
+#   - induced : TF on single trials, then average TF across trials
+#   - evoked  : average trials first, then TF on averaged signal
 #   4) run TF decomposition on PC signals
 #   5) baseline correct
 #   6) average within frequency bands
@@ -71,6 +74,7 @@ class TFBandDecoder:
         n_freqs=50,
         baseline=(-0.2, 0.0),
         baseline_mode="zscore",  # "logratio", "ratio", "percent", "zscore", "mean"
+        response_mode="induced",  # "induced" or "evoked"
         state=42,
         saveName="TFBandDecoding_shared_foldPCA.pkl",
         dtype=np.float32,
@@ -100,12 +104,16 @@ class TFBandDecoder:
         self.decode_tmax = decode_tmax
         self.baseline = baseline
         self.baseline_mode = baseline_mode
+        self.response_mode = response_mode.lower()
         self.state = state
         self.saveName = saveName
         self.dtype = dtype
         self.raw_pca_standardize = raw_pca_standardize
         self.pca_trial_cap_per_subject = pca_trial_cap_per_subject
         self.tf_n_jobs = tf_n_jobs
+
+        if self.response_mode not in {"induced", "evoked"}:
+            raise ValueError("response_mode must be either 'induced' or 'evoked'")
 
         self.classifier = classifier.lower()
         self.clf_c = clf_c
@@ -181,7 +189,6 @@ class TFBandDecoder:
         with open(os.path.join(self.bPath, self.logName), "rb") as file:
             self.senId = pickle.load(file)["Sentiment"]
 
-        # ch x time x trial x subject
         self.Dataset = self.Dataset[self.goodCh, :, :, :].astype(self.dtype, copy=False)
 
         self.n_channels, self.n_times, self.n_trials, self.n_sub = self.Dataset.shape
@@ -226,7 +233,10 @@ class TFBandDecoder:
             f"Decode window: {self.decode_tmin:.3f} to {self.decode_tmax:.3f} s "
             f"({self.decode_times.size} samples)"
         )
-        print(f"Shared fold-specific PCA before TF | classifier={self.classifier}")
+        print(
+            f"Shared fold-specific PCA before TF | "
+            f"classifier={self.classifier} | response_mode={self.response_mode}"
+        )
 
     # ------------------------------------------------------------
     # Trial index lookup
@@ -273,7 +283,7 @@ class TFBandDecoder:
     # ------------------------------------------------------------
     def _apply_baseline(self, power):
         """
-        power: (n_trials, n_pcs, n_freqs, n_times)
+        power: (n_epochs, n_pcs, n_freqs, n_times)
         """
         eps = np.finfo(np.float32).eps
         base = power[..., self.base_mask].mean(axis=-1, keepdims=True)
@@ -329,10 +339,6 @@ class TFBandDecoder:
     # Fold-specific PCA fit on all training trials
     # ------------------------------------------------------------
     def _fit_raw_pca(self, train_subjects):
-        """
-        Fit PCA using all training trials from training subjects only.
-        Channels are variables; pooled timepoints/trials are samples.
-        """
         blocks = []
 
         for sub in train_subjects:
@@ -349,7 +355,6 @@ class TFBandDecoder:
                 )
                 trial_idx = np.sort(trial_idx)
 
-            # ch x time x trial -> trial x time x ch
             x = self.Dataset[:, :, trial_idx, sub].transpose(2, 1, 0)
             x = x.reshape(-1, self.n_channels)
             blocks.append(x.astype(self.dtype, copy=False))
@@ -392,7 +397,6 @@ class TFBandDecoder:
         Returns:
             data_pc: (n_trials, n_pcs, n_times)
         """
-        # ch x time x trial -> trial x ch x time
         data = np.transpose(self.Dataset[:, :, :, sub], (2, 0, 1)).astype(
             self.dtype, copy=False
         )
@@ -460,16 +464,61 @@ class TFBandDecoder:
 
         return band_power
 
+    def _compute_evoked_map_from_pcs(self, data_pc_avg):
+        """
+        data_pc_avg: (n_pcs, n_times)
+        Returns:
+            subject_map: (n_bands, n_pcs, n_decode_times)
+        """
+        power = mne.time_frequency.tfr_array_morlet(
+            data_pc_avg[np.newaxis, ...],
+            sfreq=self.sfreq,
+            freqs=self.freqs,
+            n_cycles=self.n_cycles,
+            output="power",
+            zero_mean=True,
+            use_fft=True,
+            decim=1,
+            n_jobs=self.tf_n_jobs,
+        ).astype(self.dtype, copy=False)
+
+        power = self._apply_baseline(power)
+        power = power[..., self.decode_mask]  # 1 x n_pcs x n_freqs x n_decode_times
+        power = power[0]
+
+        n_pcs, _, n_decode_times = power.shape
+        n_bands = len(self.band_names)
+
+        subject_map = np.empty(
+            (n_bands, n_pcs, n_decode_times),
+            dtype=self.dtype,
+        )
+
+        for bi, band_name in enumerate(self.band_names):
+            f_lo, f_hi = self.bands[band_name]
+            f_mask = (self.freqs >= f_lo) & (self.freqs < f_hi)
+
+            if not np.any(f_mask):
+                raise ValueError(
+                    f"No frequencies for band {band_name}: {f_lo}-{f_hi} Hz"
+                )
+
+            subject_map[bi, :, :] = power[:, f_mask, :].mean(axis=1)
+
+        del power
+        gc.collect()
+
+        return subject_map
+
     def _build_fold_cache(self, subject_ids, mean_, std_, pca):
         """
-        Compute fold-specific band-power once per subject.
+        Compute fold-specific representation once per subject.
+        For both modes, cache projected PC trials:
+            cache[sub] = data_pc with shape (n_trials, n_pcs, n_times)
         """
         cache = {}
         for sub in tqdm(subject_ids, desc="Building fold cache", leave=False):
-            data_pc = self._project_subject_to_pcs(sub, mean_, std_, pca)
-            cache[sub] = self._compute_subject_band_power_from_pcs(data_pc)
-            del data_pc
-            gc.collect()
+            cache[sub] = self._project_subject_to_pcs(sub, mean_, std_, pca)
         return cache
 
     # ------------------------------------------------------------
@@ -485,28 +534,58 @@ class TFBandDecoder:
         keep_mask = np.zeros(subject_ids.size, dtype=bool)
 
         for i, sub in enumerate(subject_ids):
-            band_power = fold_cache[sub]
+            data_pc = fold_cache[sub]  # (n_trials, n_pcs, n_times)
 
             if contrast == "positive":
                 pos_idx = self.trial_lookup[sub][category]["positive"]
                 if pos_idx.size == 0:
                     continue
-                subject_map = band_power[pos_idx].mean(axis=0)
+
+                if self.response_mode == "induced":
+                    band_power = self._compute_subject_band_power_from_pcs(
+                        data_pc[pos_idx]
+                    )
+                    subject_map = band_power.mean(axis=0)
+                else:  # evoked
+                    data_pc_avg = data_pc[pos_idx].mean(axis=0)
+                    subject_map = self._compute_evoked_map_from_pcs(data_pc_avg)
 
             elif contrast == "negative":
                 neg_idx = self.trial_lookup[sub][category]["negative"]
                 if neg_idx.size == 0:
                     continue
-                subject_map = band_power[neg_idx].mean(axis=0)
+
+                if self.response_mode == "induced":
+                    band_power = self._compute_subject_band_power_from_pcs(
+                        data_pc[neg_idx]
+                    )
+                    subject_map = band_power.mean(axis=0)
+                else:  # evoked
+                    data_pc_avg = data_pc[neg_idx].mean(axis=0)
+                    subject_map = self._compute_evoked_map_from_pcs(data_pc_avg)
 
             elif contrast == "neg_minus_pos":
                 pos_idx = self.trial_lookup[sub][category]["neg_minus_pos"]["positive"]
                 neg_idx = self.trial_lookup[sub][category]["neg_minus_pos"]["negative"]
                 if pos_idx.size == 0 or neg_idx.size == 0:
                     continue
-                subject_map = band_power[neg_idx].mean(axis=0) - band_power[
-                    pos_idx
-                ].mean(axis=0)
+
+                if self.response_mode == "induced":
+                    band_power_pos = self._compute_subject_band_power_from_pcs(
+                        data_pc[pos_idx]
+                    )
+                    band_power_neg = self._compute_subject_band_power_from_pcs(
+                        data_pc[neg_idx]
+                    )
+                    subject_map = band_power_neg.mean(axis=0) - band_power_pos.mean(
+                        axis=0
+                    )
+                else:  # evoked
+                    data_pc_avg_pos = data_pc[pos_idx].mean(axis=0)
+                    data_pc_avg_neg = data_pc[neg_idx].mean(axis=0)
+                    subject_map = self._compute_evoked_map_from_pcs(
+                        data_pc_avg_neg
+                    ) - self._compute_evoked_map_from_pcs(data_pc_avg_pos)
 
             else:
                 raise ValueError(f"Unknown contrast: {contrast}")
@@ -574,6 +653,7 @@ class TFBandDecoder:
                 "decode_tmin": self.decode_tmin,
                 "decode_tmax": self.decode_tmax,
                 "classifier": self.classifier,
+                "response_mode": self.response_mode,
             }
         }
 
@@ -607,7 +687,6 @@ class TFBandDecoder:
 
             results[comparison_name] = {}
 
-            # initialize result holders
             for category in self.categories:
                 results[comparison_name][category] = {}
                 for contrast in self.contrasts:
@@ -620,7 +699,6 @@ class TFBandDecoder:
                         "n_splits_used": n_splits,
                     }
 
-            # fold loop
             for fi, (train_idx, test_idx) in enumerate(
                 cv.split(comparison_subjects, comparison_y)
             ):
@@ -631,10 +709,8 @@ class TFBandDecoder:
                 y_train_full = comparison_y[train_idx]
                 y_test_full = comparison_y[test_idx]
 
-                # one shared PCA per fold from all training trials
                 mean_, std_, pca = self._fit_raw_pca(train_subjects)
 
-                # one shared fold cache for all analyses in this fold
                 fold_subjects = np.concatenate([train_subjects, test_subjects])
                 fold_cache = self._build_fold_cache(fold_subjects, mean_, std_, pca)
 
@@ -676,7 +752,6 @@ class TFBandDecoder:
                 del mean_, std_, pca, fold_cache
                 gc.collect()
 
-            # finalize scores
             for category in self.categories:
                 for contrast in self.contrasts:
                     fold_scores = results[comparison_name][category][contrast][
@@ -729,7 +804,23 @@ if __name__ == "__main__":
         },
     }
 
-    decoder = TFBandDecoder(
+    # # Induced
+    # decoder_induced = TFBandDecoder(
+    #     tmin=-0.3,
+    #     tmax=1.5,
+    #     decode_tmin=-0.2,
+    #     decode_tmax=1.0,
+    #     numPC=3,
+    #     bands=bands,
+    #     comparisons=comparisons,
+    #     classifier="logreg",
+    #     response_mode="induced",
+    #     saveName="TFclassDecoding_logreg_induced.pkl",
+    #     tf_n_jobs=1,
+    # )
+
+    # Evoked
+    decoder_evoked = TFBandDecoder(
         tmin=-0.3,
         tmax=1.5,
         decode_tmin=-0.2,
@@ -737,7 +828,8 @@ if __name__ == "__main__":
         numPC=3,
         bands=bands,
         comparisons=comparisons,
-        classifier="logreg",  # "svm" or "logreg"
-        saveName="TFclassDecoding_test_logreg.pkl",
+        classifier="svm",
+        response_mode="evoked",
+        saveName="TFclassDecoding_svm_evoked.pkl",
         tf_n_jobs=1,
     )
