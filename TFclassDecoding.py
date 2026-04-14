@@ -1,5 +1,5 @@
 # ============================================================
-# PCA-before-TF time-frequency band class decoding
+# ROI/cluster-averaged time-frequency band class decoding
 # ------------------------------------------------------------
 # Group comparisons:
 #   control_vs_depressed          : 1 vs 2
@@ -7,15 +7,13 @@
 #   control_vs_suicidal           : 1 vs 3
 #   control_vs_depressedsuicidal  : 1 vs (2 or 3)
 #
-# For each fold:
-#   1) split subjects
-#   2) fit PCA on ALL training trials from training subjects only
-#   3) project train/test subjects into fold-specific PC space
-#   4) run TF decomposition on PC signals
-#   5) baseline correct
-#   6) average within frequency bands
-#   7) build subject-level maps for each category/contrast
-#   8) decode at each time point with train-only feature scaling
+# Pipeline:
+#   1) average channels into fixed ROI clusters
+#   2) run TF decomposition once per subject on ROI signals
+#   3) baseline correct
+#   4) average within frequency bands
+#   5) build subject-level maps for each category/contrast
+#   6) decode at each time point with train-only feature scaling
 #
 # Categories:
 #   Biography, Action, Reflection, Intention, All
@@ -35,7 +33,6 @@ import mat73
 from tqdm import tqdm
 
 from sklearn.model_selection import StratifiedKFold
-from sklearn.decomposition import PCA
 from sklearn.svm import LinearSVC
 from sklearn.metrics import balanced_accuracy_score
 
@@ -53,9 +50,7 @@ class TFBandDecoder:
         fileName="Data_sen_lepoch_full_long.pkl",
         IdxName="subject_index.mat",
         logName="senIdx_TOI.pkl",
-        chName="GoodChannel.mat",
         k_fold=5,
-        numPC=3,
         sfreq=250,
         tmin=-0.3,
         tmax=1.5,
@@ -67,14 +62,14 @@ class TFBandDecoder:
         baseline=(-0.2, 0.0),
         baseline_mode="zscore",  # "logratio", "ratio", "percent", "zscore", "mean"
         state=42,
-        saveName="TFBandDecoding_shared_foldPCA.pkl",
+        saveName="TFclassDecoding_ROI.pkl",
         dtype=np.float32,
         bands=None,
         categories=None,
         comparisons=None,
+        roi_clusters=None,
+        roi_names=None,
         svm_c=1.0,
-        raw_pca_standardize=False,
-        pca_trial_cap_per_subject=None,
         tf_n_jobs=1,
     ):
         self.fpath = fpath
@@ -83,10 +78,8 @@ class TFBandDecoder:
         self.fileName = fileName
         self.IdxName = IdxName
         self.logName = logName
-        self.chName = chName
 
         self.kfold = k_fold
-        self.numPC = numPC
         self.sfreq = sfreq
         self.tmin = tmin
         self.tmax = tmax
@@ -98,8 +91,6 @@ class TFBandDecoder:
         self.saveName = saveName
         self.dtype = dtype
         self.svm_c = svm_c
-        self.raw_pca_standardize = raw_pca_standardize
-        self.pca_trial_cap_per_subject = pca_trial_cap_per_subject
         self.tf_n_jobs = tf_n_jobs
 
         self.freqs = np.logspace(np.log10(fmin), np.log10(fmax), n_freqs).astype(
@@ -114,11 +105,8 @@ class TFBandDecoder:
         if bands is None:
             self.bands = {
                 "theta": (4, 8),
-                "alpha_low": (8, 10),
-                "alpha_high": (10, 13),
-                "beta_low": (13, 15),
-                "beta_mid": (15, 18),
-                "beta_high": (18, 30),
+                "alpha": (8, 13),
+                "beta": (13, 30),
                 "gamma": (30, 60),
             }
         else:
@@ -142,6 +130,18 @@ class TFBandDecoder:
         else:
             self.comparisons = comparisons
 
+        if roi_clusters is None:
+            raise ValueError("roi_clusters must be provided.")
+
+        self.roi_clusters = [np.asarray(x, dtype=int).ravel() for x in roi_clusters]
+
+        if roi_names is None:
+            self.roi_names = [f"ROI_{i+1}" for i in range(len(self.roi_clusters))]
+        else:
+            if len(roi_names) != len(self.roi_clusters):
+                raise ValueError("roi_names must match roi_clusters length.")
+            self.roi_names = list(roi_names)
+
         self.contrasts = ["positive", "negative", "neg_minus_pos"]
         self.band_names = list(self.bands.keys())
         self.rng = np.random.default_rng(self.state)
@@ -161,18 +161,11 @@ class TFBandDecoder:
             "subject_index"
         ].ravel()
 
-        self.goodCh = (
-            mat73.loadmat(os.path.join(self.bPath, self.chName))["Channel"]
-            .astype(int)
-            .ravel()
-            - 1
-        )
-
         with open(os.path.join(self.bPath, self.logName), "rb") as file:
             self.senId = pickle.load(file)["Sentiment"]
 
-        # ch x time x trial x subject
-        self.Dataset = self.Dataset[self.goodCh, :, :, :].astype(self.dtype, copy=False)
+        # Dataset shape: ch x time x trial x subject
+        self.Dataset = self.Dataset.astype(self.dtype, copy=False)
 
         self.n_channels, self.n_times, self.n_trials, self.n_sub = self.Dataset.shape
         self.times = (
@@ -193,7 +186,6 @@ class TFBandDecoder:
             self.times <= self.decode_tmax
         )
         self.decode_times = self.times[self.decode_mask]
-
         if self.decode_times.size == 0:
             raise ValueError("Decode window is empty.")
 
@@ -216,7 +208,34 @@ class TFBandDecoder:
             f"Decode window: {self.decode_tmin:.3f} to {self.decode_tmax:.3f} s "
             f"({self.decode_times.size} samples)"
         )
-        print("Shared fold-specific PCA before TF")
+        print("ROI-averaged TF class decoding")
+
+    # ------------------------------------------------------------
+    # ROI averaging
+    # ------------------------------------------------------------
+    def build_roi_data(self):
+        print("Building ROI-averaged signals...")
+
+        self.roi_sizes = []
+        for i, roi in enumerate(self.roi_clusters):
+            if np.any(roi < 0) or np.any(roi >= self.n_channels):
+                raise ValueError(
+                    f"ROI {i} contains indices outside dataset range 0..{self.n_channels - 1}"
+                )
+            self.roi_sizes.append(int(len(roi)))
+
+        self.ROIData = np.empty(
+            (len(self.roi_clusters), self.n_times, self.n_trials, self.n_sub),
+            dtype=self.dtype,
+        )
+
+        for i, roi in enumerate(tqdm(self.roi_clusters, desc="ROIs")):
+            # average channels within ROI
+            self.ROIData[i] = (
+                self.Dataset[roi].mean(axis=0).astype(self.dtype, copy=False)
+            )
+
+        gc.collect()
 
     # ------------------------------------------------------------
     # Trial index lookup
@@ -263,7 +282,7 @@ class TFBandDecoder:
     # ------------------------------------------------------------
     def _apply_baseline(self, power):
         """
-        power: (n_trials, n_pcs, n_freqs, n_times)
+        power: (n_trials, n_rois, n_freqs, n_times)
         """
         eps = np.finfo(np.float32).eps
         base = power[..., self.base_mask].mean(axis=-1, keepdims=True)
@@ -316,103 +335,22 @@ class TFBandDecoder:
         )
 
     # ------------------------------------------------------------
-    # Fold-specific PCA fit on all training trials
+    # TF on ROI signals
     # ------------------------------------------------------------
-    def _fit_raw_pca(self, train_subjects):
+    def _compute_subject_band_power_from_rois(self, subj):
         """
-        Fit PCA using all training trials from training subjects only.
-        Channels are variables; pooled timepoints/trials are samples.
+        Input:
+            ROIData[:, :, :, subj] -> rois x time x trials
+        Output:
+            band_power: (n_trials, n_bands, n_rois, n_decode_times)
         """
-        blocks = []
-
-        for sub in train_subjects:
-            trial_idx = np.arange(self.n_trials, dtype=int)
-
-            if (
-                self.pca_trial_cap_per_subject is not None
-                and trial_idx.size > self.pca_trial_cap_per_subject
-            ):
-                trial_idx = self.rng.choice(
-                    trial_idx,
-                    size=self.pca_trial_cap_per_subject,
-                    replace=False,
-                )
-                trial_idx = np.sort(trial_idx)
-
-            # ch x time x trial -> trial x time x ch
-            x = self.Dataset[:, :, trial_idx, sub].transpose(2, 1, 0)
-            x = x.reshape(-1, self.n_channels)
-            blocks.append(x.astype(self.dtype, copy=False))
-
-        if not blocks:
-            raise ValueError("No training data available to fit raw PCA.")
-
-        X_raw = np.concatenate(blocks, axis=0)
-
-        mean_ = X_raw.mean(axis=0, keepdims=True)
-        X_raw = X_raw - mean_
-
-        if self.raw_pca_standardize:
-            std_ = X_raw.std(axis=0, keepdims=True)
-            std_[std_ == 0] = 1.0
-            X_raw = X_raw / std_
-        else:
-            std_ = None
-
-        n_components = min(self.numPC, X_raw.shape[0], X_raw.shape[1])
-        if n_components < 1:
-            raise ValueError("Could not fit at least one PCA component.")
-
-        pca = PCA(n_components=n_components, random_state=self.state)
-        pca.fit(X_raw)
-
-        del X_raw, blocks
-        gc.collect()
-
-        if std_ is not None:
-            std_ = std_.astype(self.dtype, copy=False)
-
-        return mean_.astype(self.dtype, copy=False), std_, pca
-
-    # ------------------------------------------------------------
-    # Projection and TF
-    # ------------------------------------------------------------
-    def _project_subject_to_pcs(self, sub, mean_, std_, pca):
-        """
-        Returns:
-            data_pc: (n_trials, n_pcs, n_times)
-        """
-        # ch x time x trial -> trial x ch x time
-        data = np.transpose(self.Dataset[:, :, :, sub], (2, 0, 1)).astype(
+        # rois x time x trials -> trials x rois x time
+        data_roi = np.transpose(self.ROIData[:, :, :, subj], (2, 0, 1)).astype(
             self.dtype, copy=False
         )
-        n_trials, n_ch, n_times = data.shape
 
-        flat = data.transpose(0, 2, 1).reshape(-1, n_ch)
-        flat = flat - mean_
-        if std_ is not None:
-            flat = flat / std_
-
-        flat_pc = flat @ pca.components_.T
-        data_pc = (
-            flat_pc.reshape(n_trials, n_times, -1)
-            .transpose(0, 2, 1)
-            .astype(self.dtype, copy=False)
-        )
-
-        del data, flat, flat_pc
-        gc.collect()
-
-        return data_pc
-
-    def _compute_subject_band_power_from_pcs(self, data_pc):
-        """
-        data_pc: (n_trials, n_pcs, n_times)
-        Returns:
-            band_power: (n_trials, n_bands, n_pcs, n_decode_times)
-        """
         power = mne.time_frequency.tfr_array_morlet(
-            data_pc,
+            data_roi,
             sfreq=self.sfreq,
             freqs=self.freqs,
             n_cycles=self.n_cycles,
@@ -426,11 +364,11 @@ class TFBandDecoder:
         power = self._apply_baseline(power)
         power = power[..., self.decode_mask]
 
-        n_trials, n_pcs, _, n_decode_times = power.shape
+        n_trials, n_rois, _, n_decode_times = power.shape
         n_bands = len(self.band_names)
 
         band_power = np.empty(
-            (n_trials, n_bands, n_pcs, n_decode_times),
+            (n_trials, n_bands, n_rois, n_decode_times),
             dtype=self.dtype,
         )
 
@@ -445,37 +383,34 @@ class TFBandDecoder:
 
             band_power[:, bi, :, :] = power[:, :, f_mask, :].mean(axis=2)
 
-        del power
+        del power, data_roi
         gc.collect()
 
         return band_power
 
-    def _build_fold_cache(self, subject_ids, mean_, std_, pca):
-        """
-        Compute fold-specific band-power once per subject.
-        """
-        cache = {}
-        for sub in tqdm(subject_ids, desc="Building fold cache", leave=False):
-            data_pc = self._project_subject_to_pcs(sub, mean_, std_, pca)
-            cache[sub] = self._compute_subject_band_power_from_pcs(data_pc)
-            del data_pc
-            gc.collect()
-        return cache
+    def _build_subject_band_cache(self):
+        print("Computing subject TF-band cache from ROI signals...")
+        self.subject_band_cache = {}
+
+        for sub in tqdm(range(self.n_sub), desc="Subjects"):
+            self.subject_band_cache[sub] = self._compute_subject_band_power_from_rois(
+                sub
+            )
 
     # ------------------------------------------------------------
-    # Build subject maps from fold cache
+    # Build subject maps from cached ROI TF features
     # ------------------------------------------------------------
-    def _build_subject_maps(self, subject_ids, category, contrast, fold_cache):
+    def _build_subject_maps(self, subject_ids, category, contrast):
         """
         Returns:
-            X: (n_subjects_valid, n_bands, n_pcs, n_times)
+            X: (n_subjects_valid, n_bands, n_rois, n_times)
             keep_mask: bool mask aligned to subject_ids
         """
         X_list = []
         keep_mask = np.zeros(subject_ids.size, dtype=bool)
 
         for i, sub in enumerate(subject_ids):
-            band_power = fold_cache[sub]
+            band_power = self.subject_band_cache[sub]
 
             if contrast == "positive":
                 pos_idx = self.trial_lookup[sub][category]["positive"]
@@ -525,7 +460,9 @@ class TFBandDecoder:
     # ------------------------------------------------------------
     def run(self):
         self.load_EEG()
+        self.build_roi_data()
         self._precompute_trial_lookup()
+        self._build_subject_band_cache()
 
         results = {
             "meta": {
@@ -533,10 +470,10 @@ class TFBandDecoder:
                 "times": self.decode_times,
                 "bands": self.bands,
                 "band_names": self.band_names,
+                "roi_names": self.roi_names,
                 "categories": self.categories,
                 "contrasts": self.contrasts,
                 "comparisons": self.comparisons,
-                "numPC": self.numPC,
                 "decode_tmin": self.decode_tmin,
                 "decode_tmax": self.decode_tmax,
             }
@@ -572,7 +509,6 @@ class TFBandDecoder:
 
             results[comparison_name] = {}
 
-            # initialize result holders
             for category in self.categories:
                 results[comparison_name][category] = {}
                 for contrast in self.contrasts:
@@ -585,7 +521,6 @@ class TFBandDecoder:
                         "n_splits_used": n_splits,
                     }
 
-            # fold loop
             for fi, (train_idx, test_idx) in enumerate(
                 cv.split(comparison_subjects, comparison_y)
             ):
@@ -596,20 +531,13 @@ class TFBandDecoder:
                 y_train_full = comparison_y[train_idx]
                 y_test_full = comparison_y[test_idx]
 
-                # one shared PCA per fold from all training trials
-                mean_, std_, pca = self._fit_raw_pca(train_subjects)
-
-                # one shared fold cache for all analyses in this fold
-                fold_subjects = np.concatenate([train_subjects, test_subjects])
-                fold_cache = self._build_fold_cache(fold_subjects, mean_, std_, pca)
-
                 for category in self.categories:
                     for contrast in self.contrasts:
                         X_train, keep_train = self._build_subject_maps(
-                            train_subjects, category, contrast, fold_cache
+                            train_subjects, category, contrast
                         )
                         X_test, keep_test = self._build_subject_maps(
-                            test_subjects, category, contrast, fold_cache
+                            test_subjects, category, contrast
                         )
 
                         if X_train is None or X_test is None:
@@ -643,10 +571,8 @@ class TFBandDecoder:
                                     "fold_scores"
                                 ][bi, ti, fi] = balanced_accuracy_score(y_test, y_pred)
 
-                del mean_, std_, pca, fold_cache
                 gc.collect()
 
-            # finalize scores
             for category in self.categories:
                 for contrast in self.contrasts:
                     fold_scores = results[comparison_name][category][contrast][
@@ -699,6 +625,46 @@ if __name__ == "__main__":
         },
     }
 
+    roi_clusters = [
+        np.concatenate((np.array([3, 4]) - 1, np.array([1, 5]) + 31)),  # Left frontal
+        np.concatenate(
+            (np.array([1, 2, 32]) - 1, np.array([2, 3, 4, 30, 31]) + 31)
+        ),  # Mid frontal
+        np.concatenate(
+            (np.array([30, 31]) - 1, np.array([28, 29]) + 31)
+        ),  # Right frontal
+        np.concatenate(
+            (np.array([6, 8, 9, 11]) - 1, np.array([6, 7, 9, 10, 11]) + 31)
+        ),  # Left central
+        np.concatenate(
+            (np.array([7, 12, 23, 24, 29]) - 1, np.array([8, 21, 25, 32]) + 31)
+        ),  # Mid central
+        np.concatenate(
+            (np.array([22, 25, 26, 28]) - 1, np.array([22, 23, 24, 26, 27]) + 31)
+        ),  # Right central
+        np.concatenate(
+            (np.array([14, 15]) - 1, np.array([13, 14]) + 31)
+        ),  # Left parietal
+        np.concatenate(
+            (np.array([13, 16, 17, 18]) - 1, np.array([12, 15, 16, 17, 20]) + 31)
+        ),  # Mid parietal
+        np.concatenate(
+            (np.array([19, 20]) - 1, np.array([18, 19]) + 31)
+        ),  # Right parietal
+    ]
+
+    roi_names = [
+        "Left frontal",
+        "Mid frontal",
+        "Right frontal",
+        "Left central",
+        "Mid central",
+        "Right central",
+        "Left parietal",
+        "Mid parietal",
+        "Right parietal",
+    ]
+
     decoder = TFBandDecoder(
         tmin=-0.3,
         tmax=1.5,
@@ -706,8 +672,8 @@ if __name__ == "__main__":
         decode_tmax=1.0,
         bands=bands,
         comparisons=comparisons,
-        saveName="TFclassDecoding.pkl",
-        raw_pca_standardize=False,
-        pca_trial_cap_per_subject=40,  # None = use all trials for PCA fit
-        tf_n_jobs=1,  # try 4 or -1 if RAM allows
+        roi_clusters=roi_clusters,
+        roi_names=roi_names,
+        saveName="TFclassDecoding_ROI.pkl",
+        tf_n_jobs=1,
     )
