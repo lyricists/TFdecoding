@@ -212,9 +212,13 @@ __marimo__/
 
 # Results
 Results/
+Figures/
 
 # Files
 
 # Scripts
 Test.ipynb
 TFresponse_src.ipynb
+TFclassDecodingPlot.ipynb
+TFdecodingPlot.ipynb
+TFplot.ipynb
