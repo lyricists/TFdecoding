@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt
 # ------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------
-result_path = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/TFclassDecoding_svm.pkl"
-save_dir = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Figures/TFclassDecoding_svm"
+result_path = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Results/TFclassDecoding_svm_evoked.pkl"
+save_dir = "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/TFdecoding/Figures/TFclassDecoding_svm_evoked"
 
 category_to_plot = "All"
 
@@ -224,5 +224,5 @@ for comp in comparisons:
     save_path = os.path.join(
         save_dir, f"{comp}_{category_to_plot}_bands_x_contrasts.png"
     )
-    plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    # plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
     plt.show()
