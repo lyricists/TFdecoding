@@ -1,5 +1,5 @@
 # ============================================================
-# PCA-before-TF time-frequency band class decoding
+# PCA-based TF time-frequency band class decoding
 # ------------------------------------------------------------
 # Group comparisons:
 #   control_vs_depressed          : 1 vs 2
